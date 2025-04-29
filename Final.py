@@ -225,7 +225,7 @@ if 'last_analysis' not in st.session_state: st.session_state.last_analysis = Non
 
 
 # --- Function Definitions ---
-#@st.cache_data
+#@st.cache_data  # Keep cache commented out for debugging ArrowTypeError
 def load_data(uploaded_file=None):
     """Loads data from uploaded file or default, performs cleaning."""
     df = pd.DataFrame()
@@ -244,8 +244,8 @@ def load_data(uploaded_file=None):
             print(load_source_message)
             return pd.DataFrame() # Return empty if no source
 
-    print(load_source_message) # Print status
-    st.sidebar.info(load_source_message) # Show status in sidebar too
+    print(load_source_message)
+    st.sidebar.info(load_source_message)
 
     try:
         df = pd.read_excel(file_to_load)
@@ -254,15 +254,13 @@ def load_data(uploaded_file=None):
 
         # --- Data Cleaning: Column Names ---
         original_cols = df.columns.tolist()
-        df.columns = df.columns.str.strip().str.replace('[^A-Za-z0-9_]+', '', regex=True) # Clean names more aggressively
+        df.columns = df.columns.str.strip().str.replace('[^A-Za-z0-9_]+', '', regex=True) # Clean names
         new_cols = df.columns.tolist()
         if original_cols != new_cols: print(f"DEBUG load_data: Cleaned column names: {new_cols}")
-
-        # --- PRINT COLUMNS AFTER CLEANING NAMES ---
         print(f"DEBUG load_data: Columns AFTER name cleaning: {df.columns.tolist()}")
 
-        # --- Attempt to DROP the problematic column USING CLEANED NAME ---
-        column_to_drop = 'Scaler2021' # Use the expected cleaned name
+        # --- Attempt to DROP Scaler2021 ---
+        column_to_drop = 'Scaler2021'
         if column_to_drop in df.columns:
             print(f"DEBUG load_data: Attempting to drop '{column_to_drop}'...")
             try:
@@ -272,40 +270,45 @@ def load_data(uploaded_file=None):
                 print(f"ERROR load_data: Error dropping '{column_to_drop}': {drop_e}")
         else:
             print(f"DEBUG load_data: Column '{column_to_drop}' not found AFTER name cleaning, nothing to drop.")
-
-        # --- ADD CODE TO HANDLE HighGrowthFirm2021 (Force to String) ---
-        column_to_fix = 'HighGrowthFirm2021'
-        if column_to_fix in df.columns:
-            print(f"Attempting to force '{column_to_fix}' column to string type...")
-            df[column_to_fix] = df[column_to_fix].fillna('').astype(str)
-            print(f"Converted '{column_to_fix}' to string.")
-        else:
-            print(f"Column '{column_to_fix}' not found.")
-        
-        # --- PRINT COLUMNS AFTER DROP ATTEMPT ---
-        print(f"DEBUG load_data: Columns AFTER drop attempt: {df.columns.tolist()}")
+        print(f"DEBUG load_data: Columns AFTER drop attempt for {column_to_drop}: {df.columns.tolist()}")
 
 
-        # Define expected columns and defaults
-        expected_cols = {
-            'Topic': 'Uncategorized',
-            'Description': '',
-            'City': 'Unknown',
-            'CompanyName': 'Unknown', # Already checked but good practice
-            'FoundedYear': None # Use None marker for processing
-        }
+        # --- Force Multiple Flag/Indicator Columns to String --- THIS IS THE KEY FIX NOW ---
+        potential_problem_cols = [
+            'Scaler2023', 'Scaler2022', # Keep Scaler cols just in case
+            'HighGrowthFirm2023', 'HighGrowthFirm2022', 'HighGrowthFirm2021',
+            'ConsistentHighGrowthFirm2023', 'ConsistentHighGrowthFirm2022', 'ConsistentHighGrowthFirm2021',
+            'VeryHighGrowthFirm2023', 'VeryHighGrowthFirm2022', 'VeryHighGrowthFirm2021',
+            'Gazelle2023', 'Gazelle2022', 'Gazelle2021',
+            'Mature2023', 'Mature2022', 'Mature2021',
+            'Scaleup2023', 'Scaleup2022', 'Scaleup2021',
+            'Superstar2023', 'Superstar2022', 'Superstar2021',
+            'Public_or_Private' # Added this one as it might also be boolean/object
+        ]
+        print(f"DEBUG load_data: Forcing potential problem columns to string...")
+        cols_converted_count = 0
+        for col_to_fix in potential_problem_cols:
+            # Use the cleaned column name for checking existence
+            # (The column name cleaning above should have already fixed these names if they exist)
+            if col_to_fix in df.columns:
+                df[col_to_fix] = df[col_to_fix].fillna('').astype(str)
+                cols_converted_count += 1
+            # else: # Optional debug
+                # print(f"Column '{col_to_fix}' not found for string conversion.")
+        print(f"DEBUG load_data: Finished forcing {cols_converted_count} columns to string.")
+        # --- END ADDED BLOCK ---
 
+
+        # --- Other Data Cleaning ---
+        if 'CompanyName' not in df.columns: raise ValueError("Missing required column: 'CompanyName'")
+        expected_cols = {'Topic': 'Uncategorized', 'Description': '', 'City': 'Unknown', 'CompanyName': 'Unknown', 'FoundedYear': None}
         for col, default in expected_cols.items():
-            if col not in df.columns:
-                print(f"Column '{col}' not found. Creating default.")
-                df[col] = default
-            # Fill NA and ensure string type for text columns
-            if default is not None: # Handle FoundedYear separately
-                 df[col] = df[col].fillna(default).astype(str)
+            if col not in df.columns: df[col] = default
+            if default is not None: df[col] = df[col].fillna(default).astype(str)
 
-        # Handle FoundedYear specifically
         df['CompanyAge'] = pd.NA
         if 'FoundedYear' in df.columns:
+            # Convert FoundedYear AFTER ensuring it's string and filled NAs if necessary from loop above
             df['FoundedYear'] = pd.to_numeric(df['FoundedYear'], errors='coerce')
             initial_rows = len(df)
             df.dropna(subset=['FoundedYear'], inplace=True)
@@ -316,11 +319,9 @@ def load_data(uploaded_file=None):
                  current_year = datetime.datetime.now().year
                  df['CompanyAge'] = current_year - df['FoundedYear']
                  df['CompanyAge'] = df['CompanyAge'].apply(lambda x: max(0, x))
-                 print("Calculated 'CompanyAge'.")
-            else: print("No valid 'FoundedYear' entries left after cleaning.")
-        else: print("Column 'FoundedYear' not found.")
 
         print(f"Data cleaning complete. Final Shape: {df.shape}")
+        print(f"DEBUG load_data: Returning df of type {type(df)} with columns: {df.columns.tolist()}")
         return df
 
     except FileNotFoundError:
@@ -364,8 +365,8 @@ def generate_wordcloud(text, title=None):
             width=800, height=400, background_color='white',
             colormap='viridis', stopwords=stopwords_set,
             min_font_size=10, max_font_size=120,
-            random_state=42 # Ensure reproducibility
-        ).generate(text) # Removed contour for simplicity/potential issues
+            random_state=42
+        ).generate(text)
         fig, ax = plt.subplots(figsize=(10, 5))
         ax.imshow(wordcloud, interpolation='bilinear')
         ax.axis('off')
@@ -416,7 +417,12 @@ def create_company_age_chart(df_plot):
 def create_foundation_year_timeline(df_plot):
     """Creates a Plotly Line chart for company foundations over time."""
     if 'FoundedYear' not in df_plot.columns or df_plot['FoundedYear'].isnull().all(): return None
-    yearly_counts = df_plot['FoundedYear'].value_counts().sort_index()
+    # Ensure FoundedYear is numeric before counting
+    df_plot['FoundedYear'] = pd.to_numeric(df_plot['FoundedYear'], errors='coerce')
+    df_plot_valid_years = df_plot.dropna(subset=['FoundedYear'])
+    if df_plot_valid_years.empty: return None
+
+    yearly_counts = df_plot_valid_years['FoundedYear'].astype(int).value_counts().sort_index()
     current_year = datetime.datetime.now().year
     yearly_counts = yearly_counts[(yearly_counts.index > 1950) & (yearly_counts.index <= current_year)]
     if yearly_counts.empty: return None
@@ -460,10 +466,10 @@ def run_corex(texts, n_topics=10):
         return topic_model, topics, words
     except Exception as e: print(f"Error during CorEx modeling: {e}"); st.error(f"Error during CorEx modeling: {e}"); return None, None, None
 
-@st.cache_resource
+@st.cache_resource(show_spinner="Setting up AI Competitor Analysis...") # Add spinner message
 def setup_rag_for_competitor_analysis(_df_rag):
     """Sets up the RAG chain using FAISS and an LLM."""
-    global LLM_INITIALIZED
+    global LLM_INITIALIZED # Use global scope for flag
     LLM_INITIALIZED = False
     if not RAG_ENABLED or _df_rag.empty or 'Description' not in _df_rag.columns or _df_rag['Description'].isnull().all():
         print("Skipping RAG setup: Requirements not met.")
@@ -471,17 +477,21 @@ def setup_rag_for_competitor_analysis(_df_rag):
     print("Setting up RAG system...")
     try:
         documents = []
-        for _, row in _df_rag[_df_rag['Description'].str.strip().astype(bool)].iterrows():
+        valid_rows = _df_rag[_df_rag['Description'].str.strip().astype(bool)].copy() # Ensure working with copy for safety if modifying row object
+        print(f"Processing {len(valid_rows)} rows with valid descriptions for RAG.")
+        for _, row in valid_rows.iterrows():
             content = f"CompanyName: {row.get('CompanyName', 'N/A')}\nDescription: {row.get('Description', '')}\n"
-            for col in ['Topic', 'City', 'FoundedYear']: # Use cleaned column names
+            for col in ['Topic', 'City', 'FoundedYear']:
                 if col in _df_rag.columns and pd.notna(row.get(col)):
-                    key_name = 'Industry/Topic' if col == 'Topic' else col
+                    key_name = 'IndustryTopic' if col == 'Topic' else col # Standardize Topic key
                     content += f"{key_name}: {row[col]}\n"
-            other_cols = [c for c in _df_rag.columns if c not in ['CompanyName', 'Description', 'Topic', 'City', 'FoundedYear', 'CompanyAge', 'AgeGroup'] and pd.notna(row.get(c))] # Adjusted column names
+            # Add all other non-empty, non-standard columns as key-value pairs
+            other_cols = [c for c in _df_rag.columns if c not in ['CompanyName', 'Description', 'Topic', 'City', 'FoundedYear', 'CompanyAge', 'AgeGroup'] and pd.notna(row.get(c))]
             for col in other_cols: content += f"{col}: {row[col]}\n"
             documents.append(Document(page_content=content.strip(), metadata={"company": row.get('CompanyName', 'N/A')}))
+
         if not documents: print("No valid documents created for RAG."); return None
-        print(f"Created {len(documents)} documents for RAG.")
+        print(f"Created {len(documents)} documents for RAG vector store.")
 
         model_name = "all-MiniLM-L6-v2"
         print(f"Loading embedding model: {model_name}")
@@ -504,7 +514,9 @@ def setup_rag_for_competitor_analysis(_df_rag):
 
         LLM_INITIALIZED = True
         print(f"RAG system ready using {llm_provider}.")
+        st.session_state['rag_llm_provider'] = llm_provider # Store which LLM is active
         return ConversationalRetrievalChain.from_llm(llm=llm, retriever=vectorstore.as_retriever(search_kwargs={"k": 7}), return_source_documents=True)
+
     except Exception as e: print(f"Error setting up RAG system: {e}"); st.error(f"Error setting up RAG: {e}"); return None
 
 def find_potential_competitors(company_name, company_details, retrieval_chain):
@@ -512,7 +524,7 @@ def find_potential_competitors(company_name, company_details, retrieval_chain):
     if retrieval_chain is None: return "Competitor analysis system not available.", []
     print(f"Finding competitors for: {company_name}")
     try:
-        query = f"""Analyze the provided database of Irish CHGFs to find potential competitors for: "{company_name}". Company Details: {company_details}. Identify the top 3-5 most similar companies based on business description, industry/sector, and target market. For each potential competitor found ONLY in the database: 1. Provide CompanyName, Description, and Industry/Topic. 2. Briefly explain the key similarity making them a competitor. Exclude "{company_name}" itself. Format clearly, starting with a summary. If no strong competitors are found, state that clearly."""
+        query = f"""Analyze the provided database of Irish CHGFs to find potential competitors for: "{company_name}". Company Details: {company_details}. Identify the top 3-5 most similar companies based on business description, industry/sector, and target market. For each potential competitor found ONLY in the database: 1. Provide CompanyName, Description, and IndustryTopic. 2. Briefly explain the key similarity making them a competitor. Exclude "{company_name}" itself. Format clearly, starting with a summary. If no strong competitors are found, state that clearly."""
         result = retrieval_chain({"question": query, "chat_history": []})
         llm_answer = result.get("answer", "Analysis could not be generated.")
         print(f"LLM Answer received (length: {len(llm_answer)}).")
@@ -527,13 +539,14 @@ def find_potential_competitors(company_name, company_details, retrieval_chain):
                     if ': ' in line:
                         key, value = line.split(': ', 1)
                         key, value = key.strip(), value.strip()
-                        if key == 'Industry/Topic': key = 'IndustryTopic' # Standardize key for easier access
+                        # Standardize keys during parsing
+                        if key == 'Industry/Topic': key = 'IndustryTopic'
                         elif key == 'Company Name': key = 'CompanyName'
+                        elif key == 'Description': key = 'Description'
                         company_info[key] = value
                         if key == "CompanyName": comp_name_found = value
                 if comp_name_found and comp_name_found.lower() not in seen_companies:
                     if 'CompanyName' in company_info:
-                        # Ensure IndustryTopic exists, map if needed
                         if 'IndustryTopic' not in company_info: company_info['IndustryTopic'] = company_info.get('Topic','N/A')
                         competitors.append(company_info)
                         seen_companies.add(comp_name_found.lower())
@@ -547,27 +560,22 @@ def find_potential_competitors(company_name, company_details, retrieval_chain):
 
 # ======== Main Application Logic ========
 def main():
-    st.error("RUNNING LATEST CODE VERSION - DROP SCALER2021") # <<< ADD THIS LINE FIRST
     # --- Page Title ---
     col1_title, col2_title = st.columns([1, 10], gap="small")
-    # ... (rest of the main function) ...
-    # --- Page Title ---
-    col1_title, col2_title = st.columns([1, 10], gap="small") # Adjusted ratio
     with col1_title: st.markdown("""<div style="background-color: white; padding: 5px; border-radius: 5px; text-align: center; height: 60px; display: flex; align-items: center; justify-content: center;"><div style="display: flex; height: 40px; width: 60px; border: 1px solid #ccc;"><div style="background-color: #169b62; flex: 1;"></div><div style="background-color: white; flex: 1;"></div><div style="background-color: #ff883e; flex: 1;"></div></div></div>""", unsafe_allow_html=True)
     with col2_title: st.title("Irish CHGFs Analysis Dashboard")
 
     # --- Data Input & Loading ---
     st.sidebar.markdown("## 📂 Data Input")
     uploaded_file = st.sidebar.file_uploader("Upload Excel File (Optional)", type=['xlsx', 'xls'])
-    df = load_data(uploaded_file)
+    df = load_data(uploaded_file) # Load and clean data
 
-    # --- Check if DataFrame loaded correctly --- ADDED FIX HERE ---
+    # --- Check if DataFrame loaded correctly ---
     if df is None:
         st.error("Fatal Error: Data loading returned None. Cannot proceed.")
         st.stop()
     elif df.empty:
         st.warning("No data loaded or found. Please upload a file or ensure 'ireland_cleaned_CHGF.xlsx' is present.")
-        # Optionally allow app to proceed with limited functionality or stop
         st.stop()
     else:
         print("DataFrame loaded successfully in main(). Proceeding...")
@@ -575,15 +583,23 @@ def main():
 
 
     # --- Initialize RAG System ---
-    if RAG_ENABLED and 'retrieval_chain' not in st.session_state: # Initialize only once
-         print("Attempting RAG setup...")
+    if RAG_ENABLED and 'retrieval_chain' not in st.session_state:
          st.session_state.retrieval_chain = setup_rag_for_competitor_analysis(df)
-         # No rerun here, status displayed via sidebar logic
+         # Optional: Rerun might be needed if setup changes UI elements immediately
+         # st.rerun()
+
+    # Display RAG status in sidebar AFTER attempting setup
+    if RAG_ENABLED:
+        if st.session_state.get('retrieval_chain') is not None:
+             provider = st.session_state.get('rag_llm_provider', 'Unknown LLM')
+             st.sidebar.success(f"✔ RAG Ready ({provider})")
+        else:
+             st.sidebar.error("❌ RAG Setup Failed")
 
 
     # --- Sidebar Filters ---
     st.sidebar.markdown("## 📊 Global Filters")
-    df_filtered = df.copy() # Start with the validated DataFrame
+    df_filtered = df.copy()
     # Topic Filter
     if 'Topic' in df_filtered.columns:
         all_topics = sorted([t for t in df_filtered['Topic'].unique() if pd.notna(t) and t != 'Uncategorized'])
@@ -596,19 +612,19 @@ def main():
          if all_cities:
             selected_cities = st.sidebar.multiselect("Filter by City", options=all_cities, default=[])
             if selected_cities: df_filtered = df_filtered[df_filtered['City'].isin(selected_cities)]
-    # Age Filter - Use CompanyAge column name
+    # Age Filter
     if 'CompanyAge' in df_filtered.columns and not df_filtered['CompanyAge'].isnull().all():
          min_age, max_age = int(df_filtered['CompanyAge'].min()), int(df_filtered['CompanyAge'].max())
          if max_age > min_age:
             age_range = st.sidebar.slider("Filter by Company Age", min_age, max_age, (min_age, max_age))
             df_filtered = df_filtered[df_filtered['CompanyAge'].between(age_range[0], age_range[1])]
-    # Name Search Filter - Use CompanyName column name
+    # Name Search Filter
     if 'CompanyName' in df_filtered.columns:
         company_search = st.sidebar.text_input("Search by Company Name")
         if company_search:
             df_filtered = df_filtered[df_filtered['CompanyName'].str.contains(company_search, case=False, na=False)]
 
-    # Display Filtered Count & Download
+    # Filtered Count & Download
     st.sidebar.markdown(f"""<div style="background-color: #eef2ff; padding: 10px; border-radius: 5px; margin-top: 15px; text-align: center; font-size: 0.9rem;"><span style="font-weight: 600;">{len(df_filtered)}</span> / {len(df)} companies showing</div>""", unsafe_allow_html=True)
     if not df_filtered.empty: st.sidebar.markdown("<div style='text-align: center; margin-top: 10px;'>"+get_download_link(df_filtered, 'filtered_data.csv', 'Download Filtered')+"</div>", unsafe_allow_html=True)
     else: st.sidebar.info("No companies match filters.")
@@ -624,7 +640,7 @@ def main():
     with tabs[0]:
         st.header("Dashboard Overview")
         col1, col2, col3, col4 = st.columns(4)
-        df_display_metrics = df_filtered if not df_filtered.empty else df # Use filtered or full
+        df_display_metrics = df_filtered if not df_filtered.empty else df
         num_comps = len(df_display_metrics)
         num_topics = df_display_metrics['Topic'].nunique() if 'Topic' in df_display_metrics else 0
         num_cities = df_display_metrics['City'].nunique() if 'City' in df_display_metrics else 0
@@ -652,31 +668,34 @@ def main():
 
         st.markdown("---")
         st.subheader("Sample Data Preview (First 10 Rows of Full Dataset)")
-        st.dataframe(df.head(10), use_container_width=True, height=300)
+        # Add try-except around potentially failing dataframe displays
+        try:
+            st.dataframe(df.head(10), use_container_width=True, height=300)
+        except Exception as e:
+            st.error(f"Error displaying sample data: {e}")
+            st.caption("Could not display sample data due to internal error (check logs).")
 
 
     # ======== TAB 1: Company Explorer ========
     with tabs[1]:
         st.header("Company Explorer")
-        # --- ADDED None CHECK ---
-        if df_filtered is None:
-            st.error("Data filtering error occurred.")
-        elif df_filtered.empty:
-             st.warning("No companies match the current filter criteria set in the sidebar.")
+        if df_filtered is None: st.error("Data filtering error occurred.")
+        elif df_filtered.empty: st.warning("No companies match filters.")
         else:
             col1_exp, col2_exp = st.columns([1, 3])
+            df_display = df_filtered # Default if no sorting needed
             with col1_exp:
                 st.markdown("#### Display Options")
-                sortable_cols = [col for col in ['CompanyName', 'Topic', 'City', 'FoundedYear', 'CompanyAge'] if col in df_filtered.columns] # Use cleaned names
+                sortable_cols = [col for col in ['CompanyName', 'Topic', 'City', 'FoundedYear', 'CompanyAge'] if col in df_filtered.columns]
                 sort_by = st.selectbox("Sort by", sortable_cols, key="explorer_sort")
                 sort_asc = st.radio("Order", ["Ascending", "Descending"], index=0, key="explorer_order") == "Ascending"
                 items_per_page = st.slider("Items per page", 5, 50, 10, 5, key="explorer_paginate")
-
-            df_display = df_filtered.sort_values(by=sort_by, ascending=sort_asc, na_position='last') if sort_by in df_filtered else df_filtered
+                if sort_by in df_filtered:
+                     df_display = df_filtered.sort_values(by=sort_by, ascending=sort_asc, na_position='last')
 
             with col2_exp:
                 total_pages = max(1, (len(df_display) + items_per_page - 1) // items_per_page)
-                current_page = 1 # Default page
+                current_page = 1
                 if total_pages > 1: current_page = st.number_input("Page", 1, total_pages, 1, 1, key="explorer_page_num")
                 start_idx, end_idx = (current_page - 1) * items_per_page, min(current_page * items_per_page, len(df_display))
                 st.caption(f"Showing companies {start_idx + 1} to {end_idx} of {len(df_display)}")
@@ -684,20 +703,31 @@ def main():
             st.markdown("---")
             if start_idx >= end_idx: st.info("No companies to display on this page.")
             else:
-                for _, row in df_display.iloc[start_idx:end_idx].iterrows():
+                # Display only the necessary slice to avoid potential serialization of large df
+                df_page = df_display.iloc[start_idx:end_idx]
+                for _, row in df_page.iterrows():
+                    # Use row data safely with .get()
                     with st.expander(f"{row.get('CompanyName', 'N/A')}", expanded=False):
                         exp_col1, exp_col2 = st.columns([1, 3])
                         with exp_col1:
                             st.markdown(f"**Topic:** {row.get('Topic', 'N/A')}")
                             st.markdown(f"**City:** {row.get('City', 'N/A')}")
-                            if pd.notna(row.get('FoundedYear')): st.markdown(f"**Founded:** {int(row['FoundedYear'])}")
-                            if pd.notna(row.get('CompanyAge')): st.markdown(f"**Age:** {int(row['CompanyAge'])} years")
+                            founded_year = row.get('FoundedYear')
+                            if pd.notna(founded_year): st.markdown(f"**Founded:** {int(founded_year)}")
+                            company_age = row.get('CompanyAge')
+                            if pd.notna(company_age): st.markdown(f"**Age:** {int(company_age)} years")
                         with exp_col2:
                             st.markdown(f"**Description:**")
                             desc = row.get('Description', '')
                             st.caption(desc if desc else "No description available.")
-                            other_data = {k:v for k,v in row.items() if k not in ['CompanyName','Topic','City','FoundedYear','CompanyAge','Description','AgeGroup'] and pd.notna(v)} # Adjusted names
-                            if other_data: st.json(other_data, expanded=False)
+                            # Construct other_data safely from the row Series
+                            other_data = {k:v for k,v in row.items() if k not in ['CompanyName','Topic','City','FoundedYear','CompanyAge','Description','AgeGroup'] and pd.notna(v)}
+                            if other_data:
+                                try:
+                                    st.json(other_data, expanded=False)
+                                except Exception as json_e:
+                                    st.error(f"Could not display additional info as JSON: {json_e}")
+                                    st.caption(str(other_data)) # Fallback to string
 
 
     # ======== TAB 2: Topic Analysis ========
@@ -710,9 +740,9 @@ def main():
             if not all_topics: st.warning("No valid topics found.")
             else:
                 st.markdown("#### Select Topic to Analyze")
-                topic_for_analysis = st.selectbox("", options=all_topics, key="topic_analysis_select_tab2_final")
+                topic_for_analysis = st.selectbox("", options=all_topics, key="topic_analysis_select_tab2_final", label_visibility="collapsed") # Hide label
 
-                combined_description = "" # Defensive init
+                combined_description = ""
                 topic_companies = pd.DataFrame()
 
                 if topic_for_analysis:
@@ -723,7 +753,14 @@ def main():
                     st.markdown(f"""<div style="background-color: #f0f9ff; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 5px solid #103778;"><h3 style="color: #103778; margin-top: 0;">Analysis: {topic_for_analysis} ({len(topic_companies)} companies)</h3></div>""", unsafe_allow_html=True)
                     with st.expander("View Companies & Download", expanded=False):
                         if not topic_companies.empty:
-                             st.dataframe(topic_companies[['CompanyName', 'Description']], use_container_width=True, height=200) # Use clean names
+                             # Display only relevant columns to potentially avoid Arrow error on hidden ones
+                             cols_to_display = ['CompanyName', 'Description']
+                             display_df_topic = topic_companies[[col for col in cols_to_display if col in topic_companies.columns]]
+                             try:
+                                 st.dataframe(display_df_topic, use_container_width=True, height=200)
+                             except Exception as e:
+                                 st.error(f"Error displaying topic companies: {e}")
+                                 st.caption("Could not display table due to internal error.")
                              st.markdown(get_download_link(topic_companies, f'topic_{topic_for_analysis}.csv', f'Download Data'), unsafe_allow_html=True)
                         else: st.write("No companies found for this topic.")
 
@@ -758,8 +795,10 @@ def main():
     # ======== TAB 3: Advanced Topic Modeling ========
     with tabs[3]:
         st.header("Advanced Topic Modeling")
+        modeling_method = None # Define outside if needed below
         if 'Description' not in df.columns: st.warning("Advanced Topic Modeling requires the 'Description' column.")
-        elif ct is None and modeling_method == "CorEx": st.warning("CorEx library failed to import, cannot run CorEx modeling.") # Check if ct loaded
+        # Check if ct loaded before accessing modeling_method if default is CorEx
+        # elif ct is None and modeling_method == "CorEx": st.warning("CorEx library failed to import, cannot run CorEx modeling.")
         else:
             descriptions = df['Description'].dropna().astype(str).tolist()
             descriptions = [d for d in descriptions if len(d.split()) > 5]
@@ -768,6 +807,9 @@ def main():
                 st.markdown("<p>Discover underlying themes using BERTopic or CorEx.</p>", unsafe_allow_html=True)
                 modeling_options = ["BERTopic"]
                 if ct is not None: modeling_options.append("CorEx") # Only show CorEx if import worked
+                # Ensure CorEx isn't selected if ct is None
+                if "CorEx" not in modeling_options and modeling_method=="CorEx": modeling_method = "BERTopic"
+
                 modeling_method = st.radio("Select Method", modeling_options, key="adv_model_method", horizontal=True)
 
                 num_topics = st.slider("Number of Topics", 5, 30, 10, 1, key="adv_num_topics")
@@ -778,33 +820,42 @@ def main():
                              if topic_model and topics is not None:
                                  st.success("BERTopic modeling complete!")
                                  topic_info = topic_model.get_topic_info()
-                                 st.dataframe(topic_info, use_container_width=True, height=300)
+                                 try:
+                                     st.dataframe(topic_info, use_container_width=True, height=300)
+                                 except Exception as e:
+                                     st.error(f"Error displaying BERTopic info table: {e}")
                                  st.caption("Topic -1 represents outliers.")
-                         elif modeling_method == "CorEx" and ct is not None: # Ensure ct exists
+                         elif modeling_method == "CorEx" and ct is not None:
                              topic_model, topics, words = run_corex(descriptions, num_topics)
                              if topic_model and topics:
                                  st.success("CorEx modeling complete!")
                                  st.write(f"Total Correlation (TC): {topic_model.tc:.3f}")
                                  for i, topic_w in enumerate(topics):
-                                     words_str = ", ".join([f"{w}({s:.2f})" for w, s in topic_w[:8]]) # Show top 8 with scores
+                                     words_str = ", ".join([f"{w}({s:.2f})" for w, s in topic_w[:8]])
                                      st.markdown(f"**Topic {i}:** {words_str}...")
 
 
     # ======== TAB 4: Competitor Analysis ========
     with tabs[4]:
         st.header("Competitor Analysis AI")
-        if not RAG_ENABLED: st.error("Competitor Analysis Disabled (Requires API Key & Setup).")
-        elif st.session_state.retrieval_chain is None: st.error("RAG system is not initialized (check setup status in sidebar).")
-        else:
+        # Display status based on RAG enablement and initialization state
+        if not RAG_ENABLED:
+            st.error("Competitor Analysis Disabled: Requires API Key for Groq or OpenAI.")
+        elif st.session_state.get('retrieval_chain') is None:
+             # Check if setup failed or just hasn't run yet
+             if 'rag_setup_attempted' not in st.session_state: # Add a flag if needed
+                 st.info("Initializing RAG system...") # Or simply wait for setup
+             else:
+                 st.error("RAG system failed to initialize. Check logs and API keys/secrets.")
+        else: # RAG is enabled and initialized
             with st.form("competitor_form_tab4"):
                 st.markdown("**Enter Your Company Details:**")
                 c1f, c2f = st.columns(2)
                 with c1f: company_name_input = st.text_input("Your Company Name*", key="ca_comp_name")
                 with c2f:
-                     # Use cleaned 'Topic' column
                      industry_options = sorted([t for t in df['Topic'].unique() if t not in ['Uncategorized', 'Unknown']])
                      industry_type_input = st.selectbox("Your Industry/Sector*", options=[""] + industry_options, key="ca_industry", index=0)
-                company_description_input = st.text_area("Describe your company*", height=120, key="ca_desc")
+                company_description_input = st.text_area("Describe your company*", height=120, key="ca_desc", placeholder="Products, services, target market...")
                 submitted = st.form_submit_button("Find Potential Competitors")
 
             if submitted:
@@ -828,7 +879,6 @@ def main():
                  cols = st.columns(min(3, num_to_display))
                  for i, comp in enumerate(st.session_state.competitors_found[:num_to_display]):
                      with cols[i % len(cols)]:
-                         # Use standardized keys 'CompanyName', 'Description', 'IndustryTopic'
                          st.markdown(f"""<div class="company-card"><h4>{comp.get('CompanyName', '?')}</h4><p><strong>Industry:</strong> {comp.get('IndustryTopic', 'N/A')}</p><p class='description'>{comp.get('Description', 'N/A')}</p></div>""", unsafe_allow_html=True)
                  comp_df = pd.DataFrame(st.session_state.competitors_found[:num_to_display])
                  st.markdown(get_download_link(comp_df, 'competitors.csv','Download Details'), unsafe_allow_html=True)
@@ -836,6 +886,7 @@ def main():
 
             st.markdown("---")
             st.markdown("#### Ask Follow-up Questions")
+            # Use a fixed height container for scrollable chat history
             chat_history_display = st.container(height=300)
             with chat_history_display:
                  for i, msg in enumerate(st.session_state.chat_history): st.markdown(f"<div class='chat-container {'user-message' if msg['role']=='user' else 'bot-message'}'><p><strong>{'You' if msg['role']=='user' else 'AI'}:</strong> {msg['content']}</p></div>", unsafe_allow_html=True)
@@ -850,8 +901,12 @@ def main():
                  formatted_hist = [(msg["content"], resp["content"]) for msg, resp in zip(st.session_state.chat_history[::2], st.session_state.chat_history[1::2])]
                  with st.spinner("Thinking..."):
                     try:
-                        result = st.session_state.retrieval_chain({"question": context_for_llm + chat_input, "chat_history": formatted_hist})
-                        response = result.get("answer", "Sorry, I couldn't process that.")
+                        # Ensure retrieval chain exists before calling
+                        if st.session_state.retrieval_chain:
+                             result = st.session_state.retrieval_chain({"question": context_for_llm + chat_input, "chat_history": formatted_hist})
+                             response = result.get("answer", "Sorry, I couldn't process that.")
+                        else:
+                             response = "Error: Retrieval chain is not available."
                     except Exception as e: response = f"An error occurred: {str(e)}"
                  st.session_state.chat_history.append({"role": "assistant", "content": response})
                  st.rerun()
