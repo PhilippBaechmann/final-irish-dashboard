@@ -251,6 +251,20 @@ def load_data(uploaded_file=None):
         df = pd.read_excel(file_to_load)
         print(f"Successfully read data. Shape: {df.shape}")
 
+    # --- REVISED AGAIN: Try DROPPING the problematic column ---
+        if 'Scaler2021' in df.columns:
+            try:
+                df = df.drop(columns=['Scaler2021'])
+                print("Successfully DROPPED the 'Scaler2021' column.")
+                # --- ADD PRINT STATEMENT HERE ---
+                print(f"DEBUG load_data: Columns AFTER drop: {df.columns.tolist()}")
+            except Exception as drop_e:
+                print(f"Error dropping 'Scaler2021' column: {drop_e}")
+                # Continue without the column if drop fails for some reason
+                pass
+        else:
+            print("Column 'Scaler2021' not found, nothing to drop.")
+
         # --- Data Cleaning ---
         original_cols = df.columns.tolist()
         df.columns = df.columns.str.strip().str.replace('[^A-Za-z0-9_]+', '', regex=True) # Clean names more aggressively
