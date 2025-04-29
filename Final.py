@@ -534,6 +534,10 @@ def find_potential_competitors(company_name, company_details, retrieval_chain):
 
 # ======== Main Application Logic ========
 def main():
+    st.error("RUNNING LATEST CODE VERSION - DROP SCALER2021") # <<< ADD THIS LINE FIRST
+    # --- Page Title ---
+    col1_title, col2_title = st.columns([1, 10], gap="small")
+    # ... (rest of the main function) ...
     # --- Page Title ---
     col1_title, col2_title = st.columns([1, 10], gap="small") # Adjusted ratio
     with col1_title: st.markdown("""<div style="background-color: white; padding: 5px; border-radius: 5px; text-align: center; height: 60px; display: flex; align-items: center; justify-content: center;"><div style="display: flex; height: 40px; width: 60px; border: 1px solid #ccc;"><div style="background-color: #169b62; flex: 1;"></div><div style="background-color: white; flex: 1;"></div><div style="background-color: #ff883e; flex: 1;"></div></div></div>""", unsafe_allow_html=True)
