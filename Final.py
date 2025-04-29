@@ -14,10 +14,12 @@ from bertopic import BERTopic
 try:
     from corextopic import corextopic as ct
 except ImportError:
-    st.error("Could not import 'corextopic'. Please ensure 'corextopic' (not 'corextopic-py') is in requirements.txt and installed.")
+    # Don't use st.error here as it violates set_page_config rule if called too early
+    print("ERROR: Could not import 'corextopic'. Ensure 'corextopic' is in requirements.txt.")
     ct = None # Assign None if import fails
 from sklearn.feature_extraction.text import CountVectorizer
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer # Main import needed
+import torch # Needed for fallback model Tensor conversion if used
 import base64
 import io
 from PIL import Image
@@ -29,6 +31,12 @@ from langchain_community.vectorstores import FAISS
 from langchain.chains import ConversationalRetrievalChain
 from langchain.docstore.document import Document
 from langchain_community.embeddings import SentenceTransformerEmbeddings
+# Imports needed for mock LLM fallback
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
+from langchain.llms.fake import FakeListLLM # Correct import path
+
 import os
 import datetime
 import asyncio
@@ -52,7 +60,7 @@ def download_nltk_resources():
     import nltk
     needed = {'tokenizers/punkt': 'punkt', 'corpora/stopwords': 'stopwords'}
     downloaded_any = False
-    print("Checking NLTK resources...") # Print to console, not app UI
+    print("Checking NLTK resources...")
     for resource_path, download_name in needed.items():
         try:
             nltk.data.find(resource_path)
@@ -102,6 +110,67 @@ def safe_get_stopwords():
 # --- End NLTK Setup ---
 
 
+# --- Fallback Embedding Model Setup --- ADDED THIS FUNCTION ---
+@st.cache_resource
+def get_local_sentence_transformer():
+    """Creates a minimal sentence transformer that works offline."""
+    # Imports moved inside to avoid top-level errors if libraries missing initially
+    from sentence_transformers import SentenceTransformer
+    import torch
+    import numpy as np
+
+    class MinimalSentenceTransformer:
+        """Fallback sentence transformer when online models are unavailable."""
+        def __init__(self):
+            print("Creating fallback sentence transformer (offline mode)")
+            self.device = 'cpu'
+            self.max_seq_length = 128
+
+        def encode(self, sentences, batch_size=32, show_progress_bar=False,
+                   convert_to_numpy=True, convert_to_tensor=False,
+                   device=None, normalize_embeddings=False):
+            """Creates deterministic embeddings based on text hash for offline use."""
+            if isinstance(sentences, str):
+                sentences = [sentences]
+
+            embeddings = []
+            for sentence in sentences:
+                # Use hash of sentence to create a deterministic vector
+                seed = sum(ord(c) for c in sentence) % (2**32) # Ensure seed is within 32-bit range
+                np.random.seed(seed)
+                # Create a 384-dim vector (same as all-MiniLM-L6-v2)
+                embedding = np.random.normal(0, 0.1, 384) # Smaller std dev might be better
+                # Normalize the vector
+                norm = np.linalg.norm(embedding)
+                if norm > 0: # Avoid division by zero
+                    embedding = embedding / norm
+                embeddings.append(embedding)
+
+            result = np.vstack(embeddings).astype(np.float32) # Ensure float32
+
+            if convert_to_tensor:
+                return torch.tensor(result)
+            return result # Returns numpy array by default
+
+    # Try to load the real model, fall back to minimal implementation
+    model_name = "all-MiniLM-L6-v2"
+    try:
+        print(f"Attempting to load SentenceTransformer model: {model_name}...")
+        # Specify cache folder explicitly if needed in restricted environments
+        # cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "sentence_transformers")
+        # os.makedirs(cache_dir, exist_ok=True)
+        # model = SentenceTransformer(model_name, cache_folder=cache_dir)
+        model = SentenceTransformer(model_name)
+        print("SentenceTransformer model loaded successfully!")
+        return model
+    except Exception as e:
+        print(f"Failed to load SentenceTransformer model '{model_name}': {e}")
+        print("Using minimal offline fallback model instead.")
+        st.warning("⚠️ Using offline fallback embedding model. RAG quality will be reduced.", icon="🤖")
+        return MinimalSentenceTransformer()
+# --- End Fallback Embedding Model Setup ---
+
+
 # --- LLM and Environment Variable Setup ---
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
@@ -118,7 +187,7 @@ try:
 except ImportError as e:
     print(f"ERROR: Failed to import Langchain LLM classes: {e}")
     llm_classes_imported = False
-    RAG_ENABLED = False
+    RAG_ENABLED = False # Disable RAG if imports fail
 
 warnings.filterwarnings('ignore')
 # --- End LLM Setup ---
@@ -202,16 +271,7 @@ else: st.sidebar.error("❌ NLTK Punkt Missing")
 if nltk_stopwords_ok: st.sidebar.success("✔ NLTK Stopwords Ready")
 else: st.sidebar.error("❌ NLTK Stopwords Missing")
 
-if not RAG_ENABLED:
-    if not llm_classes_imported: st.sidebar.error("❌ Langchain LLM Import Failed")
-    st.sidebar.error("❌ No API Key (Groq/OpenAI)")
-    st.sidebar.warning("Competitor Analysis Disabled")
-else:
-    key_status = []
-    if USE_GROQ and GROQ_API_KEY: key_status.append("Groq")
-    if USE_OPENAI and OPENAI_API_KEY: key_status.append("OpenAI")
-    st.sidebar.success(f"✔ API Key(s) Found: {', '.join(key_status)}")
-    st.sidebar.info("Competitor Analysis Enabled")
+# Display RAG status later, after initialization attempt in main()
 st.sidebar.markdown("---")
 # --- End Setup Status Display ---
 
@@ -221,11 +281,12 @@ if 'retrieval_chain' not in st.session_state: st.session_state.retrieval_chain =
 if 'chat_history' not in st.session_state: st.session_state.chat_history = []
 if 'competitors_found' not in st.session_state: st.session_state.competitors_found = []
 if 'last_analysis' not in st.session_state: st.session_state.last_analysis = None
+if 'rag_llm_provider' not in st.session_state: st.session_state.rag_llm_provider = None
 # --- End Session State ---
 
 
 # --- Function Definitions ---
-#@st.cache_data  # Keep cache commented out for debugging ArrowTypeError
+#@st.cache_data # Keep cache commented out for debugging
 def load_data(uploaded_file=None):
     """Loads data from uploaded file or default, performs cleaning."""
     df = pd.DataFrame()
@@ -242,44 +303,34 @@ def load_data(uploaded_file=None):
         else:
             load_source_message = f"Default file {default_file} not found and no file uploaded."
             print(load_source_message)
-            # Return empty DataFrame, main() function will handle this with st.stop()
             return pd.DataFrame()
 
     print(load_source_message)
-    st.sidebar.info(load_source_message)
+    st.sidebar.info(load_source_message) # Show status in sidebar too
 
     try:
         df = pd.read_excel(file_to_load)
         print(f"DEBUG load_data: Initial shape {df.shape}.")
         print(f"DEBUG load_data: Columns AS READ from Excel: {df.columns.tolist()}")
 
-        # --- Data Cleaning: Column Names ---
         original_cols = df.columns.tolist()
-        # Aggressive cleaning for column names
-        df.columns = df.columns.str.strip().str.replace('[^A-Za-z0-9_]+', '', regex=True)
+        df.columns = df.columns.str.strip().str.replace('[^A-Za-z0-9_]+', '', regex=True) # Clean names
         new_cols = df.columns.tolist()
         if original_cols != new_cols: print(f"DEBUG load_data: Cleaned column names: {new_cols}")
         print(f"DEBUG load_data: Columns AFTER name cleaning: {df.columns.tolist()}")
 
-
-        # --- Attempt to DROP Scaler2021 ---
         column_to_drop = 'Scaler2021'
         if column_to_drop in df.columns:
             print(f"DEBUG load_data: Attempting to drop '{column_to_drop}'...")
             try:
                 df = df.drop(columns=[column_to_drop])
                 print(f"DEBUG load_data: Successfully DROPPED '{column_to_drop}'.")
-            except Exception as drop_e:
-                print(f"ERROR load_data: Error dropping '{column_to_drop}': {drop_e}")
-        else:
-            print(f"DEBUG load_data: Column '{column_to_drop}' not found AFTER name cleaning, nothing to drop.")
-        # Print columns after drop attempt
+            except Exception as drop_e: print(f"ERROR load_data: Error dropping '{column_to_drop}': {drop_e}")
+        else: print(f"DEBUG load_data: Column '{column_to_drop}' not found, nothing to drop.")
         print(f"DEBUG load_data: Columns AFTER drop attempt for {column_to_drop}: {df.columns.tolist()}")
 
-
-        # --- Force Multiple Flag/Indicator Columns to String --- THIS IS THE KEY FIX NOW ---
         potential_problem_cols = [
-            'Scaler2023', 'Scaler2022', # Keep remaining Scaler cols just in case
+            'Scaler2023', 'Scaler2022',
             'HighGrowthFirm2023', 'HighGrowthFirm2022', 'HighGrowthFirm2021',
             'ConsistentHighGrowthFirm2023', 'ConsistentHighGrowthFirm2022', 'ConsistentHighGrowthFirm2021',
             'VeryHighGrowthFirm2023', 'VeryHighGrowthFirm2022', 'VeryHighGrowthFirm2021',
@@ -287,66 +338,50 @@ def load_data(uploaded_file=None):
             'Mature2023', 'Mature2022', 'Mature2021',
             'Scaleup2023', 'Scaleup2022', 'Scaleup2021',
             'Superstar2023', 'Superstar2022', 'Superstar2021',
-            'Public_or_Private' # Added this one as it might also be boolean/object
+            'Public_or_Private'
         ]
         print(f"DEBUG load_data: Forcing {len(potential_problem_cols)} potential problem columns to string...")
         cols_converted_count = 0
         for col_to_fix in potential_problem_cols:
-            # Check if the cleaned column name exists
             if col_to_fix in df.columns:
                 try:
-                    # Force conversion to string AFTER handling potential NaNs
                     df[col_to_fix] = df[col_to_fix].fillna('').astype(str)
                     cols_converted_count += 1
-                except Exception as conv_e:
-                    print(f"ERROR converting column '{col_to_fix}' to string: {conv_e}")
-
+                except Exception as conv_e: print(f"ERROR converting column '{col_to_fix}' to string: {conv_e}")
         print(f"DEBUG load_data: Finished forcing {cols_converted_count} columns to string.")
-        # --- END OF BLOCK TO FORCE COLUMNS TO STRING ---
 
-
-        # --- Other Data Cleaning ---
         if 'CompanyName' not in df.columns: raise ValueError("Missing required column: 'CompanyName'")
         expected_cols = {'Topic': 'Uncategorized', 'Description': '', 'City': 'Unknown', 'CompanyName': 'Unknown', 'FoundedYear': None}
         for col, default in expected_cols.items():
             if col not in df.columns: df[col] = default
-            # Ensure correct type AFTER potential modification by string loop
             if col == 'FoundedYear':
-                 # FoundedYear might have been converted to string if in potential_problem_cols
-                 # Convert back to numeric, handling empty strings from fillna
-                 df[col] = pd.to_numeric(df[col], errors='coerce')
-            elif default is not None: # Ensure other text columns are string
-                df[col] = df[col].fillna(default).astype(str)
+                 if col in potential_problem_cols: df[col] = pd.to_numeric(df[col], errors='coerce')
+                 else: df[col] = df[col].fillna(pd.NA); df[col] = pd.to_numeric(df[col], errors='coerce')
+            elif default is not None: df[col] = df[col].fillna(default).astype(str)
 
         df['CompanyAge'] = pd.NA
         if 'FoundedYear' in df.columns:
-            # FoundedYear should be numeric or NA here after processing above
             initial_rows = len(df)
-            df.dropna(subset=['FoundedYear'], inplace=True) # Drop rows where conversion failed
+            df.dropna(subset=['FoundedYear'], inplace=True)
             dropped_rows = initial_rows - len(df)
-            if dropped_rows > 0: print(f"Dropped {dropped_rows} rows due to invalid 'FoundedYear' after processing.")
+            if dropped_rows > 0: print(f"Dropped {dropped_rows} rows due to invalid 'FoundedYear'.")
             if not df.empty:
                  df['FoundedYear'] = df['FoundedYear'].astype(int)
                  current_year = datetime.datetime.now().year
                  df['CompanyAge'] = current_year - df['FoundedYear']
                  df['CompanyAge'] = df['CompanyAge'].apply(lambda x: max(0, x))
 
-
         print(f"Data cleaning complete. Final Shape: {df.shape}")
-        # --- PRINT TYPE AND COLUMNS RIGHT BEFORE RETURN ---
         print(f"DEBUG load_data: Returning df of type {type(df)} with columns: {df.columns.tolist()}")
         return df
+    except FileNotFoundError: st.error(f"Error: File not found."); return pd.DataFrame()
+    except ValueError as ve: st.error(f"Data Error: {ve}"); return pd.DataFrame()
+    except Exception as e: st.error(f"Unexpected error loading data: {e}"); return pd.DataFrame()
 
-    except FileNotFoundError:
-        st.error(f"Error: File not found at path '{file_to_load}'.")
-        return pd.DataFrame()
-    except ValueError as ve:
-        st.error(f"Data Error: {ve}")
-        return pd.DataFrame()
-    except Exception as e:
-        st.error(f"An unexpected error occurred during data loading/processing: {str(e)}")
-        return pd.DataFrame()
-
+# --- get_download_link, preprocess_text, generate_wordcloud ---
+# --- create_city_pie_chart, create_company_age_chart, create_foundation_year_timeline ---
+# --- run_bertopic, run_corex ---
+# (Keep these functions exactly as they were in the last complete code block)
 def get_download_link(df, filename, text):
     """Generates an HTML download link for a DataFrame."""
     try:
@@ -356,7 +391,6 @@ def get_download_link(df, filename, text):
     except Exception as e:
         print(f"Error creating download link: {e}")
         return "<span>Error creating download link</span>"
-
 
 @st.cache_data
 def preprocess_text(text):
@@ -418,6 +452,11 @@ def create_company_age_chart(df_plot):
     if 'CompanyAge' not in df_plot.columns or df_plot['CompanyAge'].isnull().all(): return None
     try:
         df_temp = df_plot.copy()
+        # Ensure CompanyAge is numeric before cutting
+        df_temp['CompanyAge'] = pd.to_numeric(df_temp['CompanyAge'], errors='coerce')
+        df_temp.dropna(subset=['CompanyAge'], inplace=True)
+        if df_temp.empty: return None # Handle case where all ages were invalid
+
         df_temp['AgeGroup'] = pd.cut(df_temp['CompanyAge'], bins=[0, 3, 5, 10, 15, 20, float('inf')], labels=['0-3', '4-5', '6-10', '11-15', '16-20', '21+'], right=False )
         age_distribution = df_temp['AgeGroup'].value_counts().sort_index()
     except Exception as e: print(f"Error creating age groups: {e}"); return None
@@ -431,7 +470,7 @@ def create_foundation_year_timeline(df_plot):
     """Creates a Plotly Line chart for company foundations over time."""
     if 'FoundedYear' not in df_plot.columns or df_plot['FoundedYear'].isnull().all(): return None
     # Ensure FoundedYear is numeric before counting
-    df_plot_valid_years = df_plot.dropna(subset=['FoundedYear'])
+    df_plot_valid_years = df_plot.dropna(subset=['FoundedYear']) # Assumes it was converted to numeric in load_data
     if df_plot_valid_years.empty: return None
 
     yearly_counts = df_plot_valid_years['FoundedYear'].astype(int).value_counts().sort_index()
@@ -478,59 +517,166 @@ def run_corex(texts, n_topics=10):
         return topic_model, topics, words
     except Exception as e: print(f"Error during CorEx modeling: {e}"); st.error(f"Error during CorEx modeling: {e}"); return None, None, None
 
-@st.cache_resource(show_spinner="Setting up AI Competitor Analysis...") # Add spinner message
+# --- Fallback Embedding Model Setup --- ADDED THIS FUNCTION ---
+@st.cache_resource(show_spinner=False) # Show spinner in setup_rag instead
+def get_embedding_model():
+    """Loads real SentenceTransformer or provides a fallback."""
+    # Imports needed for this function
+    from sentence_transformers import SentenceTransformer
+    import torch
+    import numpy as np
+
+    class MinimalSentenceTransformer:
+        """Fallback offline sentence transformer using hashing."""
+        def __init__(self):
+            print("Creating fallback sentence transformer (offline mode)")
+            self.device = 'cpu' # Define device attribute
+        def encode(self, sentences, batch_size=32, show_progress_bar=False,
+                   convert_to_numpy=True, convert_to_tensor=False,
+                   device=None, normalize_embeddings=False):
+            if isinstance(sentences, str): sentences = [sentences]
+            embeddings = []
+            for sentence in sentences:
+                seed = sum(ord(c) for c in sentence) % (2**32)
+                np.random.seed(seed)
+                embedding = np.random.normal(0, 0.1, 384).astype(np.float32) # 384-dim like MiniLM
+                norm = np.linalg.norm(embedding)
+                if norm > 0: embedding = embedding / norm
+                embeddings.append(embedding)
+            result = np.vstack(embeddings)
+            if convert_to_tensor: return torch.tensor(result)
+            return result
+
+    model_name = "all-MiniLM-L6-v2"
+    model = None
+    try:
+        print(f"Attempting to load SentenceTransformer model: {model_name}...")
+        model = SentenceTransformer(model_name)
+        print("SentenceTransformer model loaded successfully!")
+        # Test encode works to catch issues early
+        _ = model.encode("Test sentence")
+        print("Model encode test successful.")
+        return model, "Real" # Return model and type
+    except Exception as e:
+        print(f"ERROR loading SentenceTransformer '{model_name}': {e}. Using fallback.")
+        st.warning("⚠️ Could not download embedding model. Using offline fallback (RAG quality reduced).", icon="🌐")
+        return MinimalSentenceTransformer(), "Fallback" # Return fallback and type
+# --- End Fallback Embedding Model Setup ---
+
+
+# --- RAG Setup Function (Modified) ---
+@st.cache_resource(show_spinner="Setting up AI Competitor Analysis...")
 def setup_rag_for_competitor_analysis(_df_rag):
-    """Sets up the RAG chain using FAISS and an LLM."""
+    """Sets up the RAG chain using FAISS and an LLM, with embedding fallback."""
     global LLM_INITIALIZED # Use global scope for flag
     LLM_INITIALIZED = False
-    if not RAG_ENABLED or _df_rag.empty or 'Description' not in _df_rag.columns or _df_rag['Description'].isnull().all():
-        print("Skipping RAG setup: Requirements not met.")
+    st.session_state['rag_llm_provider'] = "None" # Default provider status
+
+    # Check basic requirements first
+    if 'Description' not in _df_rag.columns or _df_rag['Description'].isnull().all():
+        st.error("RAG Setup Failed: 'Description' column missing or empty.")
         return None
-    print("Setting up RAG system...")
+
+    # 1. Prepare Documents
+    print("Preparing documents for RAG...")
+    documents = []
     try:
-        documents = []
-        valid_rows = _df_rag[_df_rag['Description'].str.strip().astype(bool)].copy() # Ensure working with copy for safety if modifying row object
+        valid_rows = _df_rag[_df_rag['Description'].str.strip().astype(bool)].copy()
+        if valid_rows.empty:
+            st.warning("No rows with valid descriptions found for RAG analysis.")
+            return None
         print(f"Processing {len(valid_rows)} rows with valid descriptions for RAG.")
         for _, row in valid_rows.iterrows():
             content = f"CompanyName: {row.get('CompanyName', 'N/A')}\nDescription: {row.get('Description', '')}\n"
             for col in ['Topic', 'City', 'FoundedYear']:
                 if col in _df_rag.columns and pd.notna(row.get(col)):
-                    key_name = 'IndustryTopic' if col == 'Topic' else col # Standardize Topic key
+                    key_name = 'IndustryTopic' if col == 'Topic' else col
                     content += f"{key_name}: {row[col]}\n"
-            # Add all other non-empty, non-standard columns as key-value pairs
             other_cols = [c for c in _df_rag.columns if c not in ['CompanyName', 'Description', 'Topic', 'City', 'FoundedYear', 'CompanyAge', 'AgeGroup'] and pd.notna(row.get(c))]
             for col in other_cols: content += f"{col}: {row[col]}\n"
             documents.append(Document(page_content=content.strip(), metadata={"company": row.get('CompanyName', 'N/A')}))
-
-        if not documents: print("No valid documents created for RAG."); return None
+        if not documents: print("No documents created for RAG."); return None
         print(f"Created {len(documents)} documents for RAG vector store.")
+    except Exception as doc_e:
+        print(f"Error creating documents for RAG: {doc_e}")
+        st.error(f"Error preparing data for RAG: {doc_e}")
+        return None
 
-        model_name = "all-MiniLM-L6-v2"
-        print(f"Loading embedding model: {model_name}")
-        try: embeddings = SentenceTransformerEmbeddings(model_name=model_name)
-        except Exception as emb_e: print(f"Failed to load embedding model: {emb_e}"); st.error(f"Embedding model failed: {emb_e}"); return None
+    # 2. Get Embedding Model (Real or Fallback)
+    print("Loading/creating embedding model...")
+    embedding_model, model_type = get_embedding_model()
+    if embedding_model is None:
+        st.error("Failed to get any embedding model (real or fallback).")
+        return None
+    print(f"Using {model_type} embedding model.")
 
-        print("Creating FAISS vector store...")
+    # 3. Create Langchain Embeddings Wrapper
+    try:
+        # We need to instantiate SentenceTransformerEmbeddings differently if using fallback
+        if model_type == "Real":
+             # Use model_name for caching benefits if using real model
+             embeddings = SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2", model_kwargs={'device': 'cpu'})
+             # We don't need to set .client if using model_name
+        else: # Fallback model
+             embeddings = SentenceTransformerEmbeddings(model_name=None, model_kwargs={'device': 'cpu'})
+             # Manually assign the instantiated fallback model to the client attribute
+             embeddings.client = embedding_model
+        print("Langchain embedding wrapper created.")
+    except Exception as wrap_e:
+        print(f"Error creating Langchain embedding wrapper: {wrap_e}")
+        st.error(f"Embedding wrapper failed: {wrap_e}")
+        return None
+
+    # 4. Create FAISS Vector Store
+    print("Creating FAISS vector store...")
+    try:
         vectorstore = FAISS.from_documents(documents, embeddings)
         print("Vector store created.")
+    except Exception as vs_e:
+        print(f"Vector store creation failed: {vs_e}")
+        st.error(f"Vector store creation failed: {vs_e}")
+        return None
 
-        llm = None
-        llm_provider = "None"
+    # 5. Initialize LLM (Real or Mock)
+    llm = None
+    llm_provider = "None"
+    if RAG_ENABLED: # Only try real LLMs if keys exist
         if USE_GROQ and GROQ_API_KEY and ChatGroq:
             try: llm = ChatGroq(model="mixtral-8x7b-32768", api_key=GROQ_API_KEY, temperature=0.6); llm_provider = "Groq"; print("Groq LLM Initialized.")
             except Exception as e: print(f"Groq init failed: {e}.")
         if llm is None and USE_OPENAI and OPENAI_API_KEY and ChatOpenAI:
             try: llm = ChatOpenAI(model="gpt-3.5-turbo", api_key=OPENAI_API_KEY, temperature=0.6); llm_provider = "OpenAI"; print("OpenAI LLM Initialized.")
-            except Exception as e: print(f"OpenAI init failed: {e}"); st.error(f"OpenAI LLM failed: {e}"); return None
-        if llm is None: print("LLM initialization failed."); st.error("LLM could not be initialized."); return None
+            except Exception as e: print(f"OpenAI init failed: {e}")
 
-        LLM_INITIALIZED = True
-        print(f"RAG system ready using {llm_provider}.")
-        st.session_state['rag_llm_provider'] = llm_provider # Store which LLM is active
-        return ConversationalRetrievalChain.from_llm(llm=llm, retriever=vectorstore.as_retriever(search_kwargs={"k": 7}), return_source_documents=True)
+    if llm is None:
+        print("Using Mock LLM (No API Key detected or LLM failed to initialize).")
+        st.warning("⚠️ Using Mock LLM for responses. Add API Key in Secrets for real AI analysis.", icon="🤖")
+        responses = ["Mock Response: Based on vector similarity, potential competitors might be X, Y, Z. Provide API Key for detailed AI analysis."] * 10 # Repeat mock response
+        llm = FakeListLLM(responses=responses)
+        llm_provider = "Mock LLM"
 
-    except Exception as e: print(f"Error setting up RAG system: {e}"); st.error(f"Error setting up RAG: {e}"); return None
+    LLM_INITIALIZED = True
+    st.session_state['rag_llm_provider'] = llm_provider # Store which LLM is active
+    print(f"RAG system ready using {llm_provider}.")
 
+    # 6. Create Conversational Chain
+    try:
+        chain = ConversationalRetrievalChain.from_llm(
+            llm=llm,
+            retriever=vectorstore.as_retriever(search_kwargs={"k": 5}), # Reduced k slightly
+            return_source_documents=True
+        )
+        print("ConversationalRetrievalChain created.")
+        return chain
+    except Exception as chain_e:
+        print(f"Failed to create conversational chain: {chain_e}")
+        st.error(f"Failed to create RAG chain: {chain_e}")
+        return None
+# --- End RAG Setup Function ---
+
+
+# --- find_potential_competitors ---
+# (Keep this function exactly as before)
 def find_potential_competitors(company_name, company_details, retrieval_chain):
     """Queries the RAG chain to find competitors."""
     if retrieval_chain is None: return "Competitor analysis system not available.", []
@@ -551,7 +697,6 @@ def find_potential_competitors(company_name, company_details, retrieval_chain):
                     if ': ' in line:
                         key, value = line.split(': ', 1)
                         key, value = key.strip(), value.strip()
-                        # Standardize keys during parsing
                         if key == 'Industry/Topic': key = 'IndustryTopic'
                         elif key == 'Company Name': key = 'CompanyName'
                         elif key == 'Description': key = 'Description'
@@ -559,7 +704,6 @@ def find_potential_competitors(company_name, company_details, retrieval_chain):
                         if key == "CompanyName": comp_name_found = value
                 if comp_name_found and comp_name_found.lower() not in seen_companies:
                     if 'CompanyName' in company_info:
-                        # Ensure IndustryTopic exists, map if needed
                         if 'IndustryTopic' not in company_info: company_info['IndustryTopic'] = company_info.get('Topic','N/A')
                         competitors.append(company_info)
                         seen_companies.add(comp_name_found.lower())
@@ -568,12 +712,11 @@ def find_potential_competitors(company_name, company_details, retrieval_chain):
         else: print("No source documents found in RAG result.")
         return llm_answer, competitors
     except Exception as e: print(f"Error finding competitors: {str(e)}"); st.error(f"Error finding competitors: {str(e)}"); return "An error occurred during competitor analysis.", []
-# --- End Function Definitions ---
+# --- End find_potential_competitors ---
 
 
 # ======== Main Application Logic ========
 def main():
-    # st.error("RUNNING LATEST CODE VERSION - DROP SCALER2021") # Comment out the debug marker now
     # --- Page Title ---
     col1_title, col2_title = st.columns([1, 10], gap="small")
     with col1_title: st.markdown("""<div style="background-color: white; padding: 5px; border-radius: 5px; text-align: center; height: 60px; display: flex; align-items: center; justify-content: center;"><div style="display: flex; height: 40px; width: 60px; border: 1px solid #ccc;"><div style="background-color: #169b62; flex: 1;"></div><div style="background-color: white; flex: 1;"></div><div style="background-color: #ff883e; flex: 1;"></div></div></div>""", unsafe_allow_html=True)
@@ -582,35 +725,24 @@ def main():
     # --- Data Input & Loading ---
     st.sidebar.markdown("## 📂 Data Input")
     uploaded_file = st.sidebar.file_uploader("Upload Excel File (Optional)", type=['xlsx', 'xls'])
-    df = load_data(uploaded_file) # Load and clean data
+    df = load_data(uploaded_file)
 
     # --- Check if DataFrame loaded correctly ---
-    if df is None:
-        st.error("Fatal Error: Data loading returned None. Cannot proceed.")
-        st.stop()
-    elif df.empty:
-        st.warning("No data loaded or found. Please upload a file or ensure 'ireland_cleaned_CHGF.xlsx' is present.")
-        st.stop()
-    else:
-        print("DataFrame loaded successfully in main(). Proceeding...")
+    if df is None: st.error("Fatal Error: Data loading failed."); st.stop()
+    elif df.empty: st.warning("No data loaded or found."); st.stop()
+    else: print("DataFrame loaded successfully in main(). Proceeding...")
     # --- End DataFrame Check ---
 
-
-    # --- Initialize RAG System ---
+    # --- Initialize RAG System (runs only once if not in session state) ---
     if RAG_ENABLED and 'retrieval_chain' not in st.session_state:
-         print("Attempting RAG setup...")
          st.session_state.retrieval_chain = setup_rag_for_competitor_analysis(df)
-         # Optional: Rerun might be needed if setup changes UI elements immediately
-         # if st.session_state.retrieval_chain is not None: st.rerun()
-
-    # Display RAG status in sidebar AFTER attempting setup
-    if RAG_ENABLED:
-        if st.session_state.get('retrieval_chain') is not None:
+         # Update sidebar status based on result (setup_rag function handles printing)
+         if st.session_state.retrieval_chain is None:
+             st.sidebar.error("❌ RAG Setup Failed")
+         else:
              provider = st.session_state.get('rag_llm_provider', 'Unknown LLM')
              st.sidebar.success(f"✔ RAG Ready ({provider})")
-        else:
-             st.sidebar.error("❌ RAG Setup Failed")
-
+         st.rerun() # Rerun needed to update the UI based on whether RAG is ready
 
     # --- Sidebar Filters ---
     st.sidebar.markdown("## 📊 Global Filters")
@@ -629,16 +761,12 @@ def main():
             if selected_cities: df_filtered = df_filtered[df_filtered['City'].isin(selected_cities)]
     # Age Filter
     if 'CompanyAge' in df_filtered.columns and not df_filtered['CompanyAge'].isnull().all():
-         min_age_val = df_filtered['CompanyAge'].min()
-         max_age_val = df_filtered['CompanyAge'].max()
-         if pd.notna(min_age_val) and pd.notna(max_age_val): # Check if min/max are valid numbers
+         min_age_val = df_filtered['CompanyAge'].min(); max_age_val = df_filtered['CompanyAge'].max()
+         if pd.notna(min_age_val) and pd.notna(max_age_val):
              min_age, max_age = int(min_age_val), int(max_age_val)
              if max_age > min_age:
                 age_range = st.sidebar.slider("Filter by Company Age", min_age, max_age, (min_age, max_age))
                 df_filtered = df_filtered[df_filtered['CompanyAge'].between(age_range[0], age_range[1])]
-         else:
-             print("WARN: Could not determine valid min/max age for slider.")
-
     # Name Search Filter
     if 'CompanyName' in df_filtered.columns:
         company_search = st.sidebar.text_input("Search by Company Name")
@@ -659,6 +787,7 @@ def main():
 
     # ======== TAB 0: Dashboard ========
     with tabs[0]:
+        # ... (Keep exactly as before) ...
         st.header("Dashboard Overview")
         col1, col2, col3, col4 = st.columns(4)
         df_display_metrics = df_filtered if not df_filtered.empty else df
@@ -689,9 +818,7 @@ def main():
 
         st.markdown("---")
         st.subheader("Sample Data Preview (First 10 Rows of Full Dataset)")
-        # Add try-except around potentially failing dataframe displays
         try:
-            # Only display columns that are known safe or explicitly handled
             safe_cols_to_display = [col for col in ['CompanyName', 'City', 'Topic', 'Description', 'FoundedYear', 'CompanyAge'] if col in df.columns]
             st.dataframe(df[safe_cols_to_display].head(10), use_container_width=True, height=300)
         except Exception as e:
@@ -701,6 +828,7 @@ def main():
 
     # ======== TAB 1: Company Explorer ========
     with tabs[1]:
+        # ... (Keep exactly as before) ...
         st.header("Company Explorer")
         if df_filtered is None: st.error("Data filtering error occurred.")
         elif df_filtered.empty: st.warning("No companies match filters.")
@@ -710,7 +838,7 @@ def main():
             with col1_exp:
                 st.markdown("#### Display Options")
                 sortable_cols = [col for col in ['CompanyName', 'Topic', 'City', 'FoundedYear', 'CompanyAge'] if col in df_filtered.columns]
-                if not sortable_cols: sortable_cols = df_filtered.columns.tolist() # Fallback
+                if not sortable_cols: sortable_cols = df_filtered.columns.tolist()
                 sort_by = st.selectbox("Sort by", sortable_cols, key="explorer_sort")
                 sort_asc = st.radio("Order", ["Ascending", "Descending"], index=0, key="explorer_order") == "Ascending"
                 items_per_page = st.slider("Items per page", 5, 50, 10, 5, key="explorer_paginate")
@@ -750,6 +878,7 @@ def main():
 
     # ======== TAB 2: Topic Analysis ========
     with tabs[2]:
+        # ... (Keep exactly as before) ...
         st.header("Topic Analysis")
         if 'Topic' not in df.columns or 'Description' not in df.columns:
             st.warning("Topic analysis requires both 'Topic' and 'Description' columns.")
@@ -773,10 +902,8 @@ def main():
                         if not topic_companies.empty:
                              cols_to_display = ['CompanyName', 'Description']
                              display_df_topic = topic_companies[[col for col in cols_to_display if col in topic_companies.columns]]
-                             try:
-                                 st.dataframe(display_df_topic, use_container_width=True, height=200)
-                             except Exception as e:
-                                 st.error(f"Error displaying topic companies table: {e}")
+                             try: st.dataframe(display_df_topic, use_container_width=True, height=200)
+                             except Exception as e: st.error(f"Error displaying topic companies table: {e}")
                              st.markdown(get_download_link(topic_companies, f'topic_{topic_for_analysis}.csv', f'Download Data'), unsafe_allow_html=True)
                         else: st.write("No companies found for this topic.")
 
@@ -810,11 +937,13 @@ def main():
 
     # ======== TAB 3: Advanced Topic Modeling ========
     with tabs[3]:
-        st.header("Advanced Topic Modeling")
-        modeling_method = "BERTopic" # Default if CorEx check fails later
-        if 'Description' not in df.columns: st.warning("Advanced Topic Modeling requires the 'Description' column.")
-        # elif ct is None and modeling_method == "CorEx": st.warning("CorEx library failed to import, cannot run CorEx modeling.") # Check ct before using CorEx
-        else:
+        # ... (Keep exactly as before) ...
+         st.header("Advanced Topic Modeling")
+         modeling_method = "BERTopic" # Default if CorEx check fails later
+         if 'Description' not in df.columns: st.warning("Advanced Topic Modeling requires the 'Description' column.")
+         # Check ct before using CorEx
+         # elif ct is None and modeling_method == "CorEx": st.warning("CorEx library failed to import, cannot run CorEx modeling.")
+         else:
             descriptions = df['Description'].dropna().astype(str).tolist()
             descriptions = [d for d in descriptions if len(d.split()) > 5]
             if not descriptions: st.warning("Not enough valid descriptions found for topic modeling.")
@@ -822,6 +951,9 @@ def main():
                 st.markdown("<p>Discover underlying themes using BERTopic or CorEx.</p>", unsafe_allow_html=True)
                 modeling_options = ["BERTopic"]
                 if ct is not None: modeling_options.append("CorEx")
+                # Ensure CorEx isn't selected if ct is None
+                if "CorEx" not in modeling_options and modeling_method=="CorEx": modeling_method = "BERTopic"
+
                 modeling_method = st.radio("Select Method", modeling_options, key="adv_model_method", horizontal=True)
 
                 num_topics = st.slider("Number of Topics", 5, 30, 10, 1, key="adv_num_topics")
@@ -848,23 +980,28 @@ def main():
     # ======== TAB 4: Competitor Analysis ========
     with tabs[4]:
         st.header("Competitor Analysis AI")
-        if not RAG_ENABLED: st.error("Competitor Analysis Disabled: Requires API Key.")
+        # Display status based on RAG enablement and initialization state
+        if not RAG_ENABLED:
+            st.error("Competitor Analysis Disabled: Requires API Key for Groq or OpenAI in Secrets.")
         elif st.session_state.get('retrieval_chain') is None:
-             st.info("Initializing RAG system... (may take a moment on first run)")
-             # Trigger setup if not initialized (setup is cached)
-             st.session_state.retrieval_chain = setup_rag_for_competitor_analysis(df)
-             if st.session_state.retrieval_chain is None:
-                 st.error("RAG system initialization failed. Check logs and API keys/secrets.")
+             # Check if setup has already been attempted and failed vs just not run yet
+             if st.session_state.get('rag_setup_failed', False): # Add a flag for persistent failure
+                  st.error("RAG system initialization failed previously. Check logs and API keys/secrets. You may need to reboot.")
              else:
-                 st.rerun() # Rerun to proceed now that chain is initialized
+                  # Show initializing message while cached function runs
+                  st.info("Initializing RAG system... (may take a moment on first run)")
+                  # The actual call happens implicitly via session state check and main logic flow
         else: # RAG is enabled and initialized
+            provider_info = f"({st.session_state.get('rag_llm_provider', 'Unknown LLM')})"
+            st.success(f"RAG System Ready {provider_info}")
             with st.form("competitor_form_tab4"):
                 st.markdown("**Enter Your Company Details:**")
                 c1f, c2f = st.columns(2)
                 with c1f: company_name_input = st.text_input("Your Company Name*", key="ca_comp_name")
                 with c2f:
                      industry_options = sorted([t for t in df['Topic'].unique() if t not in ['Uncategorized', 'Unknown']])
-                     industry_type_input = st.selectbox("Your Industry/Sector*", options=[""] + industry_options, key="ca_industry", index=0, label_visibility="collapsed") # Hide label
+                     # Add label, hide visually
+                     industry_type_input = st.selectbox("Your Industry/Sector*", options=[""] + industry_options, key="ca_industry", index=0, label_visibility="collapsed")
                 company_description_input = st.text_area("Describe your company*", height=120, key="ca_desc", placeholder="Products, services, target market...")
                 submitted = st.form_submit_button("Find Potential Competitors")
 
@@ -876,7 +1013,7 @@ def main():
                         analysis_text, comps_found = find_potential_competitors(company_name_input, full_desc_query, st.session_state.retrieval_chain)
                         st.session_state.competitors_found = comps_found
                         st.session_state.last_analysis = analysis_text
-                        st.rerun() # Rerun to display results
+                        st.rerun() # Rerun to display
 
             # Display results if available in session state
             if st.session_state.get('last_analysis'):
@@ -926,4 +1063,7 @@ def main():
 if __name__ == "__main__":
     try: asyncio.get_running_loop()
     except RuntimeError: asyncio.set_event_loop(asyncio.new_event_loop())
+    # Add a flag for RAG setup attempt to improve UI message
+    if 'rag_setup_attempted' not in st.session_state:
+        st.session_state.rag_setup_attempted = False
     main()
