@@ -670,7 +670,8 @@ def main():
         st.subheader("Sample Data Preview (First 10 Rows of Full Dataset)")
         # Add try-except around potentially failing dataframe displays
         try:
-            st.dataframe(df.head(10), use_container_width=True, height=300)
+            pass
+            #st.dataframe(df.head(10), use_container_width=True, height=300)
         except Exception as e:
             st.error(f"Error displaying sample data: {e}")
             st.caption("Could not display sample data due to internal error (check logs).")
