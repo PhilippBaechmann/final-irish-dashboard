@@ -272,6 +272,16 @@ def load_data(uploaded_file=None):
                 print(f"ERROR load_data: Error dropping '{column_to_drop}': {drop_e}")
         else:
             print(f"DEBUG load_data: Column '{column_to_drop}' not found AFTER name cleaning, nothing to drop.")
+
+        # --- ADD CODE TO HANDLE HighGrowthFirm2021 (Force to String) ---
+        column_to_fix = 'HighGrowthFirm2021'
+        if column_to_fix in df.columns:
+            print(f"Attempting to force '{column_to_fix}' column to string type...")
+            df[column_to_fix] = df[column_to_fix].fillna('').astype(str)
+            print(f"Converted '{column_to_fix}' to string.")
+        else:
+            print(f"Column '{column_to_fix}' not found.")
+        
         # --- PRINT COLUMNS AFTER DROP ATTEMPT ---
         print(f"DEBUG load_data: Columns AFTER drop attempt: {df.columns.tolist()}")
 
