@@ -225,7 +225,7 @@ if 'last_analysis' not in st.session_state: st.session_state.last_analysis = Non
 
 
 # --- Function Definitions ---
-@st.cache_data
+#@st.cache_data
 def load_data(uploaded_file=None):
     """Loads data from uploaded file or default, performs cleaning."""
     df = pd.DataFrame()
@@ -249,29 +249,32 @@ def load_data(uploaded_file=None):
 
     try:
         df = pd.read_excel(file_to_load)
-        print(f"Successfully read data. Shape: {df.shape}")
+        print(f"DEBUG load_data: Initial shape {df.shape}.")
+        print(f"DEBUG load_data: Columns AS READ from Excel: {df.columns.tolist()}")
 
-    # --- REVISED AGAIN: Try DROPPING the problematic column ---
-        if 'Scaler2021' in df.columns:
-            try:
-                df = df.drop(columns=['Scaler2021'])
-                print("Successfully DROPPED the 'Scaler2021' column.")
-                # --- ADD PRINT STATEMENT HERE ---
-                print(f"DEBUG load_data: Columns AFTER drop: {df.columns.tolist()}")
-            except Exception as drop_e:
-                print(f"Error dropping 'Scaler2021' column: {drop_e}")
-                # Continue without the column if drop fails for some reason
-                pass
-        else:
-            print("Column 'Scaler2021' not found, nothing to drop.")
-
-        # --- Data Cleaning ---
+        # --- Data Cleaning: Column Names ---
         original_cols = df.columns.tolist()
         df.columns = df.columns.str.strip().str.replace('[^A-Za-z0-9_]+', '', regex=True) # Clean names more aggressively
         new_cols = df.columns.tolist()
-        if original_cols != new_cols: print(f"Cleaned column names: {original_cols} -> {new_cols}")
+        if original_cols != new_cols: print(f"DEBUG load_data: Cleaned column names: {new_cols}")
 
-        if 'CompanyName' not in df.columns: raise ValueError("Missing required column: 'CompanyName'")
+        # --- PRINT COLUMNS AFTER CLEANING NAMES ---
+        print(f"DEBUG load_data: Columns AFTER name cleaning: {df.columns.tolist()}")
+
+        # --- Attempt to DROP the problematic column USING CLEANED NAME ---
+        column_to_drop = 'Scaler2021' # Use the expected cleaned name
+        if column_to_drop in df.columns:
+            print(f"DEBUG load_data: Attempting to drop '{column_to_drop}'...")
+            try:
+                df = df.drop(columns=[column_to_drop])
+                print(f"DEBUG load_data: Successfully DROPPED '{column_to_drop}'.")
+            except Exception as drop_e:
+                print(f"ERROR load_data: Error dropping '{column_to_drop}': {drop_e}")
+        else:
+            print(f"DEBUG load_data: Column '{column_to_drop}' not found AFTER name cleaning, nothing to drop.")
+        # --- PRINT COLUMNS AFTER DROP ATTEMPT ---
+        print(f"DEBUG load_data: Columns AFTER drop attempt: {df.columns.tolist()}")
+
 
         # Define expected columns and defaults
         expected_cols = {
